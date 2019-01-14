@@ -48,6 +48,10 @@ android {
             signingConfig signingConfigs.debug
         }
     }
+
+    configurations.all {
+        resolutionStrategy.force 'com.android.support:support-compat:27.1.1'
+    }
 }
 
 flutter {

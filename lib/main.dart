@@ -3,6 +3,7 @@ import 'package:location/location.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:localstorage/localstorage.dart';
 import 'dart:math';
+import 'dart:async';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import 'models/reminder.dart';
@@ -10,8 +11,14 @@ import 'models/reminder.dart';
 var flutterLocalNotificationsPlugin;
 
 var androidPlatformChannelSpecifics = new AndroidNotificationDetails(
-    'your channel id', 'your channel name', 'your channel description',
-    importance: Importance.Max, priority: Priority.High);
+  '1', 'reminder', 'your personal reminders',
+  importance: Importance.Max,
+  priority: Priority.High,
+  groupKey: 'reminder',
+);
+var iOSPlatformChannelSpecifics = new IOSNotificationDetails();
+var platformChannelSpecifics = new NotificationDetails(
+    androidPlatformChannelSpecifics, iOSPlatformChannelSpecifics);
 
 void main() {
   flutterLocalNotificationsPlugin = new FlutterLocalNotificationsPlugin();
@@ -51,14 +58,15 @@ calculateDistance(LatLng p1, LatLng p2) {
 
 class _SaveDialogState extends State<_SaveDialog> {
   String _text = '';
-  final inputController = TextEditingController();
+  bool _notifyOnce = true;
+  final _inputController = TextEditingController();
 
   void initState() {
     super.initState();
 
-    inputController.addListener(() {
+    _inputController.addListener(() {
       setState(() {
-        _text = inputController.text;
+        _text = _inputController.text;
       });
     });
   }
@@ -66,7 +74,7 @@ class _SaveDialogState extends State<_SaveDialog> {
   void dispose() {
     super.dispose();
 
-    inputController.dispose();
+    _inputController.dispose();
   }
 
   Widget build(BuildContext context) {
@@ -76,16 +84,29 @@ class _SaveDialogState extends State<_SaveDialog> {
             child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16.0),
                 child: Container(
-                  height: 180,
+                  height: 240,
                   child: Column(
                     children: <Widget>[
                       TextField(
                         maxLines: 3,
                         autofocus: true,
-                        controller: inputController,
+                        controller: _inputController,
                         decoration: InputDecoration(
                             labelText: 'Enter text'
                         ),
+                      ),
+                      Row(
+                        children: <Widget>[
+                          Text('Notify only once'),
+                          Checkbox(
+                            value: _notifyOnce,
+                            onChanged: (bool value) {
+                              setState(() {
+                                _notifyOnce = value;
+                              });
+                            },
+                          ),
+                        ],
                       ),
                       Padding(
                           padding: const EdgeInsets.symmetric(vertical: 16.0),
@@ -100,7 +121,7 @@ class _SaveDialogState extends State<_SaveDialog> {
                               ),
                               RaisedButton(
                                 onPressed: _text.length > 0 ? () {
-                                  widget.onSave(_text);
+                                  widget.onSave(_text, _notifyOnce);
                                   Navigator.pop(context);
                                 } : null,
                                 child: Text('Save'),
@@ -119,7 +140,7 @@ class _SaveDialogState extends State<_SaveDialog> {
 }
 
 class _SaveDialog extends StatefulWidget {
-  final Function onSave;
+  final Function(String text, bool notifyOnce) onSave;
   final Function onCancel;
 
   _SaveDialog({
@@ -139,9 +160,10 @@ class MapsDemoState extends State<MapsDemo> {
   GoogleMapController _mapController;
   Map<String, double> _currentLocation;
   final _location = Location();
-  final LocalStorage storage = new LocalStorage('reminders');
+  final LocalStorage _storage = new LocalStorage('reminders');
   List<Reminder> _reminders = [];
   Modes _mode = Modes.idle;
+  Timer _timer;
 
   initState() {
     super.initState();
@@ -153,6 +175,11 @@ class MapsDemoState extends State<MapsDemo> {
         initializationSettingsAndroid, initializationSettingsIOS);
     flutterLocalNotificationsPlugin.initialize(initializationSettings,
         onSelectNotification: _onSelectNotification);
+  }
+
+  dispose() {
+    super.dispose();
+    _timer.cancel();
   }
 
   Future _onSelectNotification(String payload) async {
@@ -171,8 +198,14 @@ class MapsDemoState extends State<MapsDemo> {
           target: center == null ? LatLng(0, 0) : center, zoom: 15.0)));
     }
 
-    _location.onLocationChanged().listen((Map<String, double> newLocation) {
-      if (_currentLocation != null || _currentLocation != null && (_currentLocation['latitude'] != newLocation['latitude'] || _currentLocation['longitude'] != newLocation['longitude'])) {
+    _timer = new Timer.periodic(Duration(seconds: 10), (Timer timer) async {
+      final newLocation = await _location.getLocation();
+
+      if (
+      _currentLocation == null ||
+        (_currentLocation['latitude'] != newLocation['latitude'] ||
+        _currentLocation['longitude'] != newLocation['longitude'])
+      ) {
         _currentLocation = newLocation;
         final currentLatLng = LatLng(_currentLocation['latitude'], _currentLocation['longitude']);
         List<Reminder> items = [];
@@ -180,23 +213,35 @@ class MapsDemoState extends State<MapsDemo> {
           final matched = calculateDistance(item.position, currentLatLng).abs() <= radius;
 
           if (matched) {
-            items.add(item);
-            flutterLocalNotificationsPlugin.show(1, '', item.text, androidPlatformChannelSpecifics);
+            print(item.notifyOnce);
+            if (item.notifyOnce) {
+              items.add(item);
+            }
+            flutterLocalNotificationsPlugin.show(new DateTime.now().millisecond, '', item.text, platformChannelSpecifics);
           }
         });
 
-        print(items);
+        items.forEach((item) {
+          _reminders.remove(item);
+
+          if (item.marker != null) {
+            _mapController.removeMarker(item.marker);
+          }
+        });
+
+        _storage.setItem('items', _reminders);
       }
     });
 
-    storage.ready.then((bool val) {
-      List<dynamic> items = storage.getItem('items') ?? [];
+    _storage.ready.then((bool val) {
+      List<dynamic> items = _storage.getItem('items') ?? [];
 
       _reminders = items.map((item) {
         final position = (item['position'] ?? '').split(',');
         final reminder = Reminder(
           id: item['id'],
           text: item['text'],
+          notifyOnce: item['notifyOnce'],
           position: LatLng(double.parse(position[0]), double.parse(position[1])),
         );
 
@@ -204,7 +249,9 @@ class MapsDemoState extends State<MapsDemo> {
             MarkerOptions(
               position: reminder.position,
             )
-        );
+        ).then((Marker marker) {
+          reminder.marker = marker;
+        });
 
         return reminder;
       }).toList();
@@ -213,16 +260,14 @@ class MapsDemoState extends State<MapsDemo> {
 
   Future<LatLng> _getUserLocation() async {
     try {
-      _currentLocation = await _location.getLocation();
+      final currentLocation = await _location.getLocation();
 
-      final lat = _currentLocation['latitude'];
-      final lng = _currentLocation['longitude'];
+      final lat = currentLocation['latitude'];
+      final lng = currentLocation['longitude'];
       final center = LatLng(lat, lng);
 
       return center;
     } catch(e) {
-      _currentLocation = null;
-
       return null;
     }
   }
@@ -272,7 +317,8 @@ class MapsDemoState extends State<MapsDemo> {
               _mode = Modes.idle;
             });
           },
-          onSave: (String text) {
+          onSave: (String text, bool notifyOnce) {
+            print(notifyOnce);
             final position = _mapController.cameraPosition.target;
 
             _mapController.addMarker(MarkerOptions(
@@ -282,13 +328,14 @@ class MapsDemoState extends State<MapsDemo> {
             setState(() {
               _mode = Modes.idle;
               final currentReminder = Reminder(
+                notifyOnce: notifyOnce,
                 position: position,
                 text: text,
               );
 
-              final items = storage.getItem('items') ?? [];
+              final items = _storage.getItem('items') ?? [];
               items.add(currentReminder);
-              storage.setItem('items', items);
+              _storage.setItem('items', items);
               _reminders.add(currentReminder);
             });
           },
