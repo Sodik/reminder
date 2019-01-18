@@ -1,12 +1,14 @@
+import 'dart:async';
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:location/location.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:localstorage/localstorage.dart';
-import 'dart:math';
-import 'dart:async';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import 'utils/distance.dart';
 import 'models/reminder.dart';
+import 'services/storage.dart';
+import 'widgets/save_dialog.dart';
 
 var flutterLocalNotificationsPlugin;
 
@@ -20,11 +22,22 @@ var iOSPlatformChannelSpecifics = new IOSNotificationDetails();
 var platformChannelSpecifics = new NotificationDetails(
     androidPlatformChannelSpecifics, iOSPlatformChannelSpecifics);
 
-void main() {
+void main() async {
+  final storage = Storage();
   flutterLocalNotificationsPlugin = new FlutterLocalNotificationsPlugin();
+  var initializationSettingsAndroid =
+  new AndroidInitializationSettings('app_icon');
+  var initializationSettingsIOS = new IOSInitializationSettings();
+  var initializationSettings = new InitializationSettings(
+      initializationSettingsAndroid, initializationSettingsIOS);
+  flutterLocalNotificationsPlugin.initialize(initializationSettings);
+
+
   runApp(MaterialApp(
     home: Scaffold(
-      body: MapsDemo(),
+      body: Map(
+        storage: storage,
+      ),
     ),
   ));
 }
@@ -37,158 +50,46 @@ enum Modes {
   confirmMarker,
 }
 
-rad(double x) {
-  return x * pi / 180;
+class Map extends StatefulWidget {
+  final Storage storage;
+
+  Map({
+    Key, key,
+    @required this.storage,
+  }): super(key: key);
+
+  State createState() => MapState();
 }
 
-calculateDistance(LatLng p1, LatLng p2) {
-  var R = 6371e3; // metres
-  var r1 = rad(p1.latitude);
-  var r2 = rad(p2.latitude);
-  var d1 = rad((p1.latitude - p2.latitude));
-  var d2 = rad((p1.longitude - p2.longitude));
-
-  var a = sin(d1/2) * sin(d1/2) + cos(r1) * cos(r2) * sin(d2/2) * sin(d2/2);
-  var c = 2 * atan2(sqrt(a), sqrt(1-a));
-
-  var d = R * c;
-
-  return d;
-}
-
-class _SaveDialogState extends State<_SaveDialog> {
-  String _text = '';
-  bool _notifyOnce = true;
-  final _inputController = TextEditingController();
+class MapState extends State<Map> with WidgetsBindingObserver {
+  static const platform = const MethodChannel('reminder.flutter.io/location');
+  GoogleMapController _mapController;
+  final _location = Location();
+  Modes _mode = Modes.idle;
 
   void initState() {
     super.initState();
-
-    _inputController.addListener(() {
-      setState(() {
-        _text = _inputController.text;
-      });
+    WidgetsBinding.instance.addObserver(this);
+    widget.storage.ready.then((_) async {
+      platform.invokeMethod('LocationService.markers', [widget.storage.items.toString()]);
     });
+  }
+
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+
+    if (state == AppLifecycleState.resumed) {
+      _mapController.clearMarkers();
+      _renderMarkers();
+    }
   }
 
   void dispose() {
     super.dispose();
-
-    _inputController.dispose();
+    WidgetsBinding.instance.removeObserver(this);
   }
 
-  Widget build(BuildContext context) {
-    return SimpleDialog(
-      children: <Widget>[
-        Form(
-            child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                child: Container(
-                  height: 240,
-                  child: Column(
-                    children: <Widget>[
-                      TextField(
-                        maxLines: 3,
-                        autofocus: true,
-                        controller: _inputController,
-                        decoration: InputDecoration(
-                            labelText: 'Enter text'
-                        ),
-                      ),
-                      Row(
-                        children: <Widget>[
-                          Text('Notify only once'),
-                          Checkbox(
-                            value: _notifyOnce,
-                            onChanged: (bool value) {
-                              setState(() {
-                                _notifyOnce = value;
-                              });
-                            },
-                          ),
-                        ],
-                      ),
-                      Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 16.0),
-                          child: Row(
-                            children: <Widget>[
-                              FlatButton(
-                                onPressed: () {
-                                  widget.onCancel();
-                                  Navigator.pop(context);
-                                },
-                                child: Text('Cancel'),
-                              ),
-                              RaisedButton(
-                                onPressed: _text.length > 0 ? () {
-                                  widget.onSave(_text, _notifyOnce);
-                                  Navigator.pop(context);
-                                } : null,
-                                child: Text('Save'),
-                              ),
-                            ],
-                          )
-                      ),
-                    ],
-                  ),
-                )
-            )
-        ),
-      ],
-    );
-  }
-}
-
-class _SaveDialog extends StatefulWidget {
-  final Function(String text, bool notifyOnce) onSave;
-  final Function onCancel;
-
-  _SaveDialog({
-    Key key,
-    @required this.onSave,
-    @required this.onCancel,
-  }): super(key: key);
-
-  _SaveDialogState createState() => _SaveDialogState();
-}
-
-class MapsDemo extends StatefulWidget {
-  State createState() => MapsDemoState();
-}
-
-class MapsDemoState extends State<MapsDemo> {
-  GoogleMapController _mapController;
-  Map<String, double> _currentLocation;
-  final _location = Location();
-  final LocalStorage _storage = new LocalStorage('reminders');
-  List<Reminder> _reminders = [];
-  Modes _mode = Modes.idle;
-  Timer _timer;
-
-  initState() {
-    super.initState();
-    // initialise the plugin. app_icon needs to be a added as a drawable resource to the Android head project
-    var initializationSettingsAndroid =
-    new AndroidInitializationSettings('app_icon');
-    var initializationSettingsIOS = new IOSInitializationSettings();
-    var initializationSettings = new InitializationSettings(
-        initializationSettingsAndroid, initializationSettingsIOS);
-    flutterLocalNotificationsPlugin.initialize(initializationSettings,
-        onSelectNotification: _onSelectNotification);
-  }
-
-  dispose() {
-    super.dispose();
-    _timer.cancel();
-  }
-
-  Future _onSelectNotification(String payload) async {
-    if (payload != null) {
-      debugPrint('notification payload: ' + payload);
-    }
-  }
-
-  _onMapCreated(GoogleMapController controller) async {
+  void _onMapCreated(GoogleMapController controller) async {
     _mapController = controller;
 
     final center = await _getUserLocation();
@@ -196,65 +97,27 @@ class MapsDemoState extends State<MapsDemo> {
     if (center != null) {
       _mapController.animateCamera(CameraUpdate.newCameraPosition(CameraPosition(
           target: center == null ? LatLng(0, 0) : center, zoom: 15.0)));
+      platform.invokeMethod('LocationService.start');
     }
 
-    _timer = new Timer.periodic(Duration(seconds: 10), (Timer timer) async {
-      final newLocation = await _location.getLocation();
-
-      if (
-      _currentLocation == null ||
-        (_currentLocation['latitude'] != newLocation['latitude'] ||
-        _currentLocation['longitude'] != newLocation['longitude'])
-      ) {
-        _currentLocation = newLocation;
-        final currentLatLng = LatLng(_currentLocation['latitude'], _currentLocation['longitude']);
-        List<Reminder> items = [];
-        _reminders.forEach((item) {
-          final matched = calculateDistance(item.position, currentLatLng).abs() <= radius;
-
-          if (matched) {
-            print(item.notifyOnce);
-            if (item.notifyOnce) {
-              items.add(item);
-            }
-            flutterLocalNotificationsPlugin.show(new DateTime.now().millisecond, '', item.text, platformChannelSpecifics);
-          }
-        });
-
-        items.forEach((item) {
-          _reminders.remove(item);
-
-          if (item.marker != null) {
-            _mapController.removeMarker(item.marker);
-          }
-        });
-
-        _storage.setItem('items', _reminders);
-      }
+    widget.storage.ready.then((_) {
+      _renderMarkers();
     });
+  }
 
-    _storage.ready.then((bool val) {
-      List<dynamic> items = _storage.getItem('items') ?? [];
+  void _renderMarkers() {
+    List<Reminder> items = widget.storage.items;
 
-      _reminders = items.map((item) {
-        final position = (item['position'] ?? '').split(',');
-        final reminder = Reminder(
-          id: item['id'],
-          text: item['text'],
-          notifyOnce: item['notifyOnce'],
-          position: LatLng(double.parse(position[0]), double.parse(position[1])),
-        );
-
-        _mapController.addMarker(
-            MarkerOptions(
-              position: reminder.position,
-            )
-        ).then((Marker marker) {
-          reminder.marker = marker;
-        });
-
-        return reminder;
-      }).toList();
+    items.forEach((item) {
+      _mapController.addMarker(
+          MarkerOptions(
+            position: item.position,
+          )
+      ).then((Marker marker) {
+        item.removeMarker = () {
+          _mapController.removeMarker(marker);
+        };
+      });
     });
   }
 
@@ -311,14 +174,13 @@ class MapsDemoState extends State<MapsDemo> {
     showDialog(
       context: context,
       builder: (BuildContext context) {
-        return _SaveDialog(
+        return SaveDialog(
           onCancel: () {
             setState(() {
               _mode = Modes.idle;
             });
           },
           onSave: (String text, bool notifyOnce) {
-            print(notifyOnce);
             final position = _mapController.cameraPosition.target;
 
             _mapController.addMarker(MarkerOptions(
@@ -333,10 +195,7 @@ class MapsDemoState extends State<MapsDemo> {
                 text: text,
               );
 
-              final items = _storage.getItem('items') ?? [];
-              items.add(currentReminder);
-              _storage.setItem('items', items);
-              _reminders.add(currentReminder);
+              widget.storage.add(currentReminder);
             });
           },
         );

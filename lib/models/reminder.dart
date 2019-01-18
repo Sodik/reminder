@@ -7,8 +7,8 @@ class Reminder {
   String id;
   LatLng position;
   String text;
-  Marker marker;
   bool notifyOnce;
+  Function removeMarker;
 
   Reminder({position, text, id, notifyOnce}) {
     this.position = position;
